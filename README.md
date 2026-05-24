@@ -49,9 +49,11 @@ chmod +x /root/xray_vps2vps_deploy.sh
 - `Exit Public Key`
 - `Exit Short ID`
 - `Exit SNI`
-- 一条给 Relay VPS 使用的一键安装命令：
+- 一段给 Relay VPS 使用的一键安装命令：
 
 ```bash
+curl -fsSL https://raw.githubusercontent.com/superchaospc/xray-vps2vps-relay/main/xray_vps2vps_deploy.sh -o /root/xray_vps2vps_deploy.sh
+chmod +x /root/xray_vps2vps_deploy.sh
 EXIT_BUNDLE='...' RELAY_PORT='443' AUTO_YES=1 /root/xray_vps2vps_deploy.sh --relay
 ```
 
@@ -63,14 +65,16 @@ EXIT_BUNDLE='...' RELAY_PORT='443' AUTO_YES=1 /root/xray_vps2vps_deploy.sh --rel
 ssh root@RELAY_VPS_IP
 ```
 
-下载脚本：
+如果 Step 1 输出的一键安装命令里已经包含 `curl` 和 `chmod`，可以直接整段粘贴，不需要重复下载。
+
+也可以先手动下载脚本：
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/superchaospc/xray-vps2vps-relay/main/xray_vps2vps_deploy.sh -o /root/xray_vps2vps_deploy.sh
 chmod +x /root/xray_vps2vps_deploy.sh
 ```
 
-然后粘贴 Step 1 里 Exit 输出的一键命令：
+然后粘贴 Step 1 里 Exit 输出的 Relay 安装命令：
 
 ```bash
 EXIT_BUNDLE='...' RELAY_PORT='443' AUTO_YES=1 /root/xray_vps2vps_deploy.sh --relay

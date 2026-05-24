@@ -27,6 +27,8 @@ CONFIG_FILE="/usr/local/etc/xray/config.json"
 INFO_FILE="/root/xray_vps2vps_info.json"
 SYSCTL_FILE="/etc/sysctl.d/99-xray-vps2vps.conf"
 IP_CACHE_FILE="/root/.xray_vps2vps_ip"
+SCRIPT_PATH="/root/xray_vps2vps_deploy.sh"
+SCRIPT_URL="https://raw.githubusercontent.com/superchaospc/xray-vps2vps-relay/main/xray_vps2vps_deploy.sh"
 BACKUP_KEEP="${BACKUP_KEEP:-5}"
 IP_CACHE_TTL="${IP_CACHE_TTL:-3600}"
 
@@ -68,6 +70,14 @@ print_banner() {
     echo "║   Client → Relay VPS → Exit VPS → Internet   ║"
     echo "╚═══════════════════════════════════════════════╝"
     echo -e "${NC}"
+}
+
+print_install_flow() {
+    echo -e "${GREEN}安装顺序：一台一台来。${NC}"
+    echo "  Step 1: 先登录落地 VPS，选择 Exit 安装。"
+    echo "  Step 2: Exit 完成后，复制它输出的整段 Relay 安装命令。"
+    echo "  Step 3: 再登录中转 VPS，粘贴那段命令安装 Relay。"
+    echo "  Step 4: 扫 Relay 输出的二维码，或导入 vless:// 链接。"
 }
 
 require_root() {
@@ -112,9 +122,9 @@ Xray VPS -> VPS 中转部署工具
   ./xray_vps2vps_deploy.sh --help       显示帮助
 
 推荐流程:
-  1. 在落地 VPS 上运行脚本，选择“推荐向导 -> Exit”。
-  2. 复制脚本输出的 Relay 一键安装命令。
-  3. 在中转 VPS 上粘贴执行。
+  1. 第一台：在落地 VPS 上运行脚本，选择 Exit 安装。
+  2. Exit 安装完成后，复制脚本输出的整段 Relay 安装命令。
+  3. 第二台：在中转 VPS 上粘贴执行这段命令。
   4. 扫 Relay 输出的二维码或导入 vless:// 链接。
 
 可选变量:
@@ -392,12 +402,15 @@ PYEOF
 print_relay_oneclick_command() {
     local bundle="$1"
     echo ""
-    echo -e "${CYAN}━━━ Relay VPS 一键安装命令 ━━━${NC}"
-    echo -e "${GREEN}在中转 VPS 上粘贴下面这一行即可自动安装 Relay：${NC}"
+    echo -e "${CYAN}━━━ 下一步：安装 Relay VPS ━━━${NC}"
+    echo -e "${GREEN}现在请登录第二台服务器（中转 VPS / Relay），粘贴下面整段命令：${NC}"
     echo ""
-    echo -e "${YELLOW}EXIT_BUNDLE='${bundle}' RELAY_PORT='443' AUTO_YES=1 /root/xray_vps2vps_deploy.sh --relay${NC}"
+    echo -e "${YELLOW}curl -fsSL ${SCRIPT_URL} -o ${SCRIPT_PATH}${NC}"
+    echo -e "${YELLOW}chmod +x ${SCRIPT_PATH}${NC}"
+    echo -e "${YELLOW}EXIT_BUNDLE='${bundle}' RELAY_PORT='443' AUTO_YES=1 ${SCRIPT_PATH} --relay${NC}"
     echo ""
     echo -e "${CYAN}如果中转端口不是 443，把 RELAY_PORT 改成你要的端口。${NC}"
+    echo -e "${CYAN}这段命令只应该在 Relay VPS 上执行，不要回到当前 Exit VPS 执行。${NC}"
 }
 
 create_exit_config() {
@@ -605,6 +618,8 @@ print_client_link() {
 
 install_exit() {
     echo -e "${GREEN}[Exit VPS 部署]${NC}"
+    echo -e "${CYAN}当前步骤：Step 1 / 2，在落地 VPS 上安装 Exit。${NC}"
+    echo -e "${CYAN}安装完成后再去第二台中转 VPS 安装 Relay。${NC}"
     prompt EXIT_PORT "Exit 监听端口" "${EXIT_PORT:-443}"
     valid_port "$EXIT_PORT" || die "端口必须是 1-65535"
     if port_in_use "$EXIT_PORT"; then
@@ -652,7 +667,17 @@ install_exit() {
 
 install_relay() {
     echo -e "${GREEN}[Relay VPS 部署]${NC}"
-    load_exit_bundle || true
+    echo -e "${CYAN}当前步骤：Step 2 / 2，在中转 VPS 上安装 Relay。${NC}"
+    if load_exit_bundle; then
+        :
+    elif [ "$AUTO_YES" != "1" ]; then
+        warn "没有检测到 EXIT_BUNDLE。正常流程是先在落地 VPS 安装 Exit，再复制 Exit 输出的 Relay 安装命令。"
+        read -r -p "仍然手动输入 Exit 的 6 个参数继续安装 Relay? (y/n): " manual_continue
+        case "$manual_continue" in
+            y|Y) ;;
+            *) echo "已取消。请先去落地 VPS 安装 Exit。"; exit 0 ;;
+        esac
+    fi
     prompt RELAY_PORT "Relay 对客户端监听端口" "${RELAY_PORT:-443}"
     valid_port "$RELAY_PORT" || die "端口必须是 1-65535"
     if port_in_use "$RELAY_PORT"; then
@@ -726,25 +751,25 @@ show_info() {
 
 guided_install() {
     print_banner
-    echo -e "${GREEN}推荐安装顺序：先落地 Exit，再中转 Relay。${NC}"
+    print_install_flow
     echo ""
-    echo "这台服务器是哪一个角色？"
-    echo "1) Exit 落地 VPS（最终出口 IP）"
-    echo "2) Relay 中转 VPS（客户端入口）"
+    echo "请选择当前这台服务器要安装的角色："
+    echo "1) Step 1: 安装 Exit 落地 VPS（第一台，最终出口 IP）"
+    echo "2) Step 2: 安装 Relay 中转 VPS（第二台，客户端入口）"
     echo "0) 返回"
     echo ""
     read -r -p "请选择: " role_choice
     case "$role_choice" in
         1)
             echo ""
-            echo -e "${CYAN}正在安装 Exit。完成后会生成一条 Relay 一键安装命令。${NC}"
+            echo -e "${CYAN}正在安装 Exit。完成后会生成给第二台 Relay VPS 使用的完整命令。${NC}"
             install_exit
             ;;
         2)
             echo ""
             if [ -z "${EXIT_BUNDLE:-}" ]; then
-                echo -e "${CYAN}如果你已经在 Exit 上拿到一键命令，建议直接粘贴那条命令。${NC}"
-                echo -e "${CYAN}这里也支持手动输入 Exit 的 6 个参数。${NC}"
+                warn "如果你还没有先安装 Exit，请先退出，到落地 VPS 上选择 Step 1。"
+                echo -e "${CYAN}如果你已经在 Exit 上拿到完整命令，更推荐直接粘贴那段命令，而不是走菜单。${NC}"
             fi
             install_relay
             ;;
@@ -772,9 +797,11 @@ uninstall_all() {
 main_menu() {
     while true; do
         print_banner
-        echo "1) 推荐向导安装（先 Exit，后 Relay）"
-        echo "2) Install Exit VPS（落地 VPS，最终直连出站）"
-        echo "3) Install Relay VPS（中转 VPS，客户端入口）"
+        print_install_flow
+        echo ""
+        echo "1) 推荐向导安装（按 Step 1/Step 2 引导）"
+        echo "2) Step 1: Install Exit VPS（落地 VPS，最终直连出站）"
+        echo "3) Step 2: Install Relay VPS（中转 VPS，客户端入口）"
         echo "4) Show status / info"
         echo "5) Restart Xray"
         echo "6) Uninstall"
