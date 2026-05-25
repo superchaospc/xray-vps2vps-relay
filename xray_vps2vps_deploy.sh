@@ -26,6 +26,7 @@ NC='\033[0m'
 CONFIG_FILE="/usr/local/etc/xray/config.json"
 INFO_FILE="/root/xray_vps2vps_info.json"
 ROUTES_FILE="/root/xray_vps2vps_routes.json"
+SUBSCRIPTION_FILE="/root/xray_vps2vps_subscription.txt"
 SYSCTL_FILE="/etc/sysctl.d/99-xray-vps2vps.conf"
 IP_CACHE_FILE="/root/.xray_vps2vps_ip"
 SCRIPT_PATH="/root/xray_vps2vps_deploy.sh"
@@ -120,6 +121,19 @@ prompt() {
     printf -v "$var_name" '%s' "$value"
 }
 
+prompt_read() {
+    local __var="$1"
+    shift
+    local value
+    if ! read -r "$@" value; then
+        printf -v "$__var" ''
+        return 1
+    fi
+    value="${value#"${value%%[![:space:]]*}"}"
+    value="${value%"${value##*[![:space:]]}"}"
+    printf -v "$__var" '%s' "$value"
+}
+
 print_help() {
     cat <<'EOF'
 Xray VPS -> VPS 中转部署工具
@@ -130,8 +144,14 @@ Xray VPS -> VPS 中转部署工具
   ./xray_vps2vps_deploy.sh --relay      给中转 Relay 添加/更新一条落地线路
   ./xray_vps2vps_deploy.sh --list       查看 Relay 上所有线路
   ./xray_vps2vps_deploy.sh --stats      查看线路流量统计
+  ./xray_vps2vps_deploy.sh --qr         选择线路并显示二维码
+  ./xray_vps2vps_deploy.sh --sub        刷新并显示订阅文件
   ./xray_vps2vps_deploy.sh --delete     删除 Relay 上的一条线路
   ./xray_vps2vps_deploy.sh --rename     修改线路名称
+  ./xray_vps2vps_deploy.sh --port       修改线路入口端口
+  ./xray_vps2vps_deploy.sh --doctor     一键排错诊断
+  ./xray_vps2vps_deploy.sh --update     更新 Xray
+  ./xray_vps2vps_deploy.sh --restart    重启 Xray
   ./xray_vps2vps_deploy.sh --status     查看状态
   ./xray_vps2vps_deploy.sh --help       显示帮助
 
@@ -1108,6 +1128,151 @@ print(quote(os.environ["VALUE"], safe=""))
 PYEOF
 }
 
+ensure_qrencode() {
+    command -v qrencode >/dev/null 2>&1 && return 0
+    warn "未检测到 qrencode，正在尝试安装二维码工具..."
+    if command -v apt-get >/dev/null 2>&1; then
+        apt-get update -y >/dev/null 2>&1 || true
+        apt-get install -y --no-install-recommends qrencode >/dev/null 2>&1 || true
+    elif command -v dnf >/dev/null 2>&1; then
+        dnf install -y qrencode >/dev/null 2>&1 || true
+    elif command -v yum >/dev/null 2>&1; then
+        yum install -y qrencode >/dev/null 2>&1 || true
+    fi
+    command -v qrencode >/dev/null 2>&1
+}
+
+show_qrcode() {
+    local link="$1"
+    local title="${2:-客户端链接}"
+    if ! ensure_qrencode; then
+        warn "qrencode 安装失败，已跳过二维码；可手动复制 vless:// 链接。"
+        return 0
+    fi
+    echo ""
+    echo -e "${CYAN}━━━ ${title} 二维码 ━━━${NC}"
+    qrencode -t ANSIUTF8 -m 2 "$link" || warn "二维码生成失败"
+}
+
+relay_routes_as_links() {
+    local relay_host="$1"
+    [ -f "$ROUTES_FILE" ] || return 1
+    ROUTES_FILE="$ROUTES_FILE" RELAY_HOST="$relay_host" CLIENT_FP="$CLIENT_FP" python3 - <<'PYEOF'
+import json
+import os
+from urllib.parse import quote
+
+with open(os.environ["ROUTES_FILE"]) as f:
+    routes = json.load(f).get("routes", [])
+for idx, route in enumerate(routes, 1):
+    name = route.get("name") or f"Route-{route.get('relay_port', idx)}"
+    fp = route.get("client_fp") or os.environ["CLIENT_FP"]
+    link = (
+        f"vless://{route['client_uuid']}@{os.environ['RELAY_HOST']}:{route['relay_port']}"
+        f"?encryption=none&flow=xtls-rprx-vision&security=reality"
+        f"&sni={route['client_sni']}&fp={fp}"
+        f"&pbk={route['client_public_key']}&sid={route['client_short_id']}"
+        f"&type=tcp#{quote(name, safe='')}"
+    )
+    print(f"{idx}\t{name}\t{link}")
+PYEOF
+}
+
+refresh_subscription_file() {
+    if [ ! -f "$ROUTES_FILE" ]; then
+        warn "未找到 Relay 线路表：$ROUTES_FILE"
+        return 1
+    fi
+    local relay_ip
+    relay_ip=$(get_public_ip)
+    ROUTES_FILE="$ROUTES_FILE" RELAY_HOST="$relay_ip" CLIENT_FP="$CLIENT_FP" \
+    SUBSCRIPTION_FILE="$SUBSCRIPTION_FILE" python3 - <<'PYEOF'
+import base64
+import json
+import os
+from urllib.parse import quote
+
+with open(os.environ["ROUTES_FILE"]) as f:
+    routes = json.load(f).get("routes", [])
+links = []
+for idx, route in enumerate(routes, 1):
+    name = route.get("name") or f"Route-{route.get('relay_port', idx)}"
+    fp = route.get("client_fp") or os.environ["CLIENT_FP"]
+    links.append(
+        f"vless://{route['client_uuid']}@{os.environ['RELAY_HOST']}:{route['relay_port']}"
+        f"?encryption=none&flow=xtls-rprx-vision&security=reality"
+        f"&sni={route['client_sni']}&fp={fp}"
+        f"&pbk={route['client_public_key']}&sid={route['client_short_id']}"
+        f"&type=tcp#{quote(name, safe='')}"
+    )
+payload = base64.b64encode(("\n".join(links) + ("\n" if links else "")).encode()).decode()
+fd = os.open(os.environ["SUBSCRIPTION_FILE"], os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+with os.fdopen(fd, "w") as f:
+    f.write(payload + "\n")
+print(len(links))
+PYEOF
+}
+
+show_subscription() {
+    echo -e "${GREEN}[订阅链接]${NC}"
+    local count
+    if ! count=$(refresh_subscription_file); then
+        return 0
+    fi
+    if [ "${count:-0}" -eq 0 ]; then
+        warn "暂无线路，订阅为空"
+        return 0
+    fi
+    ok "已刷新 ${count} 条线路到 $SUBSCRIPTION_FILE"
+    echo -e "${YELLOW}data:text/plain;base64,$(cat "$SUBSCRIPTION_FILE")${NC}"
+}
+
+show_route_qrcode() {
+    if [ ! -f "$ROUTES_FILE" ]; then
+        warn "未找到 Relay 线路表：$ROUTES_FILE"
+        return 0
+    fi
+    local relay_ip rows idx name link choice
+    relay_ip=$(get_public_ip)
+    rows=$(relay_routes_as_links "$relay_ip" || true)
+    if [ -z "$rows" ]; then
+        warn "暂无 Relay 线路"
+        return 0
+    fi
+
+    echo -e "${GREEN}[显示线路二维码]${NC}"
+    while IFS=$'\t' read -r idx name link; do
+        [ -n "$idx" ] || continue
+        echo "  ${idx}) ${name}"
+    done <<< "$rows"
+    echo "  a) 全部"
+    echo "  0) 返回"
+    echo ""
+    prompt_read choice -rp "请选择要显示二维码的线路 [a]: " || return 0
+    choice="${choice:-a}"
+    case "$choice" in
+        a|A)
+            while IFS=$'\t' read -r idx name link; do
+                [ -n "$link" ] && show_qrcode "$link" "$name"
+            done <<< "$rows"
+            ;;
+        0) return 0 ;;
+        ''|*[!0-9]*)
+            warn "无效选择"
+            return 0
+            ;;
+        *)
+            while IFS=$'\t' read -r idx name link; do
+                if [ "$idx" = "$choice" ]; then
+                    show_qrcode "$link" "$name"
+                    return 0
+                fi
+            done <<< "$rows"
+            warn "编号超出范围"
+            ;;
+    esac
+}
+
 print_client_link() {
     local relay_host="$1"
     local remark encoded_remark link
@@ -1118,10 +1283,7 @@ print_client_link() {
     echo ""
     echo -e "${CYAN}━━━ 客户端导入链接 ━━━${NC}"
     echo -e "${YELLOW}${link}${NC}"
-    if command -v qrencode >/dev/null 2>&1; then
-        echo ""
-        qrencode -t ANSIUTF8 -m 2 "$link" || true
-    fi
+    show_qrcode "$link" "$remark"
 }
 
 print_route_link() {
@@ -1168,10 +1330,11 @@ for idx, route in enumerate(routes, 1):
     print(f"{idx}. {name}")
     print(f"   Relay: {os.environ['RELAY_IP']}:{relay_port}")
     print(f"   Exit:  {exit_host}:{exit_port}")
+    fp = route.get("client_fp") or os.environ["CLIENT_FP"]
     link = (
         f"vless://{route['client_uuid']}@{os.environ['RELAY_IP']}:{relay_port}"
         f"?encryption=none&flow=xtls-rprx-vision&security=reality"
-        f"&sni={route['client_sni']}&fp={route.get('client_fp') or os.environ['CLIENT_FP']}"
+        f"&sni={route['client_sni']}&fp={fp}"
         f"&pbk={route['client_public_key']}&sid={route['client_short_id']}"
         f"&type=tcp#{quote(name, safe='')}"
     )
@@ -1388,6 +1551,95 @@ PYEOF
         die "Xray 重启失败，已回滚配置和线路表"
     fi
     ok "线路名称已修改"
+    refresh_subscription_file >/dev/null || true
+}
+
+change_relay_port() {
+    if [ ! -f "$ROUTES_FILE" ]; then
+        warn "未找到 Relay 线路表：$ROUTES_FILE"
+        return 0
+    fi
+
+    list_relay_routes
+    echo ""
+    prompt OLD_RELAY_PORT "要修改的旧 Relay 入口端口"
+    valid_port "$OLD_RELAY_PORT" || die "旧端口必须是 1-65535"
+    prompt NEW_RELAY_PORT "新的 Relay 入口端口"
+    valid_port "$NEW_RELAY_PORT" || die "新端口必须是 1-65535"
+    if [ "$OLD_RELAY_PORT" = "$NEW_RELAY_PORT" ]; then
+        warn "新旧端口相同，无需修改"
+        return 0
+    fi
+    route_port_exists "$OLD_RELAY_PORT" || die "未找到端口 ${OLD_RELAY_PORT} 对应的线路"
+    if route_port_exists "$NEW_RELAY_PORT"; then
+        die "端口 ${NEW_RELAY_PORT} 已有线路，请换一个端口"
+    fi
+    if port_in_use "$NEW_RELAY_PORT"; then
+        warn "端口 ${NEW_RELAY_PORT} 看起来已被占用。"
+        local continue_change
+        prompt_read continue_change -rp "仍然继续改端口? (y/n): " || return 0
+        case "$continue_change" in
+            y|Y|yes|YES) ;;
+            *) echo "已取消。"; return 0 ;;
+        esac
+    fi
+
+    local routes_backup tmp
+    routes_backup=$(backup_routes_file)
+    if ! ROUTES_FILE="$ROUTES_FILE" OLD_RELAY_PORT="$OLD_RELAY_PORT" NEW_RELAY_PORT="$NEW_RELAY_PORT" python3 - <<'PYEOF'
+import json
+import os
+import sys
+import time
+
+path = os.environ["ROUTES_FILE"]
+old_port = os.environ["OLD_RELAY_PORT"]
+new_port = os.environ["NEW_RELAY_PORT"]
+data = json.load(open(path))
+routes = data.get("routes", [])
+changed = False
+for route in routes:
+    if str(route.get("relay_port")) == new_port:
+        print(f"端口 {new_port} 已有线路", file=sys.stderr)
+        sys.exit(1)
+for route in routes:
+    if str(route.get("relay_port")) == old_port:
+        route["relay_port"] = new_port
+        route["updated_at"] = int(time.time())
+        changed = True
+        break
+if not changed:
+    print(f"未找到端口 {old_port} 对应的线路", file=sys.stderr)
+    sys.exit(1)
+routes.sort(key=lambda r: int(r["relay_port"]))
+fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+with os.fdopen(fd, "w") as f:
+    json.dump({"routes": routes}, f, indent=2, ensure_ascii=False)
+PYEOF
+    then
+        restore_routes_file "$routes_backup"
+        die "修改端口失败，已恢复线路表"
+    fi
+
+    tmp=$(mktemp /tmp/xray-vps2vps-relay.XXXXXX.json)
+    # shellcheck disable=SC2064
+    trap "rm -f '$tmp'" RETURN
+    if ! create_relay_multi_config "$tmp"; then
+        restore_routes_file "$routes_backup"
+        die "生成改端口后的 Relay 配置失败，已恢复线路表"
+    fi
+    if ! install_config "$tmp"; then
+        restore_routes_file "$routes_backup"
+        die "安装改端口后的 Relay 配置失败，已恢复线路表"
+    fi
+    if ! restart_xray; then
+        rollback_config_and_routes "$routes_backup"
+        die "Xray 重启失败，已回滚配置和线路表"
+    fi
+    open_firewall_port "$NEW_RELAY_PORT"
+    refresh_subscription_file >/dev/null || true
+    ok "线路入口端口已从 ${OLD_RELAY_PORT} 修改为 ${NEW_RELAY_PORT}"
+    warn "如果旧端口只给这条线路使用，请到云厂商安全组里手动移除 ${OLD_RELAY_PORT}/tcp。"
 }
 
 delete_relay_route() {
@@ -1431,6 +1683,7 @@ PYEOF
             restore_routes_file "$routes_backup"
             die "停止 Xray 失败，已恢复线路表"
         fi
+        rm -f "$SUBSCRIPTION_FILE"
         ok "线路已删除"
         return 0
     fi
@@ -1451,7 +1704,191 @@ PYEOF
         rollback_config_and_routes "$routes_backup"
         die "Xray 重启失败，已回滚配置和线路表"
     fi
+    refresh_subscription_file >/dev/null || true
     ok "线路已删除，其余 ${remaining} 条线路不受影响"
+}
+
+diagnose_system() {
+    echo -e "${CYAN}╔═══════════════════════════════════════════════╗${NC}"
+    echo -e "${CYAN}║                 一键排错诊断                  ║${NC}"
+    echo -e "${CYAN}╚═══════════════════════════════════════════════╝${NC}"
+    local errors=0
+
+    echo ""
+    echo -e "${GREEN}[1/8] Xray 服务${NC}"
+    if systemctl is-active --quiet xray; then
+        echo -e "  ${GREEN}✓ Xray 正在运行${NC}"
+    else
+        echo -e "  ${RED}✗ Xray 未运行${NC}"
+        journalctl -u xray -n 10 --no-pager 2>/dev/null | sed 's/^/    /' || true
+        errors=$((errors + 1))
+    fi
+
+    echo ""
+    echo -e "${GREEN}[2/8] 配置文件${NC}"
+    if [ -f "$CONFIG_FILE" ]; then
+        echo -e "  ${GREEN}✓ 配置文件存在：${CONFIG_FILE}${NC}"
+        if python3 -m json.tool "$CONFIG_FILE" >/dev/null 2>&1; then
+            echo -e "  ${GREEN}✓ JSON 格式正确${NC}"
+        else
+            echo -e "  ${RED}✗ JSON 格式错误${NC}"
+            errors=$((errors + 1))
+        fi
+        if command -v xray >/dev/null 2>&1 && xray run -test -config "$CONFIG_FILE" >/dev/null 2>&1; then
+            echo -e "  ${GREEN}✓ xray run -test 通过${NC}"
+        else
+            echo -e "  ${YELLOW}⚠ 未通过 xray run -test 或未找到 xray 命令${NC}"
+        fi
+    else
+        echo -e "  ${RED}✗ 配置文件不存在${NC}"
+        errors=$((errors + 1))
+    fi
+
+    echo ""
+    echo -e "${GREEN}[3/8] Relay 线路表${NC}"
+    if [ -f "$ROUTES_FILE" ]; then
+        ROUTES_FILE="$ROUTES_FILE" python3 - <<'PYEOF' || errors=$((errors + 1))
+import json
+import os
+data = json.load(open(os.environ["ROUTES_FILE"]))
+routes = data.get("routes", [])
+print(f"  ✓ 线路数量：{len(routes)}")
+for route in routes:
+    print(f"    - {route.get('name', '未命名')}: Relay:{route.get('relay_port')} -> Exit:{route.get('exit_host')}:{route.get('exit_port')}")
+PYEOF
+    else
+        echo -e "  ${YELLOW}⚠ 未找到线路表。Exit 机器只有 ${INFO_FILE} 是正常的；Relay 机器应有 ${ROUTES_FILE}${NC}"
+    fi
+
+    echo ""
+    echo -e "${GREEN}[4/8] 监听端口${NC}"
+    local ports
+    ports=$(CONFIG_FILE="$CONFIG_FILE" python3 - <<'PYEOF' 2>/dev/null || true
+import json
+import os
+try:
+    cfg = json.load(open(os.environ["CONFIG_FILE"]))
+except Exception:
+    raise SystemExit(0)
+for inbound in cfg.get("inbounds", []):
+    if inbound.get("tag") != "api-in" and inbound.get("port"):
+        print(inbound["port"])
+PYEOF
+)
+    if [ -z "$ports" ]; then
+        echo -e "  ${YELLOW}⚠ 未解析到业务监听端口${NC}"
+    else
+        local port
+        for port in $ports; do
+            if ss -tln 2>/dev/null | awk '{print $4}' | grep -Eq "[:.]${port}$"; then
+                echo -e "  ${GREEN}✓ ${port}/tcp 正在监听${NC}"
+            else
+                echo -e "  ${RED}✗ ${port}/tcp 未监听${NC}"
+                errors=$((errors + 1))
+            fi
+        done
+    fi
+
+    echo ""
+    echo -e "${GREEN}[5/8] Exit 连通性${NC}"
+    if [ -f "$ROUTES_FILE" ]; then
+        while IFS=$'\t' read -r name host port; do
+            [ -n "$host" ] || continue
+            if timeout 5 bash -c "</dev/tcp/${host}/${port}" >/dev/null 2>&1; then
+                echo -e "  ${GREEN}✓ ${name}: ${host}:${port} 可达${NC}"
+            else
+                echo -e "  ${RED}✗ ${name}: ${host}:${port} 不可达${NC}"
+                errors=$((errors + 1))
+            fi
+        done < <(ROUTES_FILE="$ROUTES_FILE" python3 - <<'PYEOF'
+import json
+import os
+try:
+    routes = json.load(open(os.environ["ROUTES_FILE"])).get("routes", [])
+except Exception:
+    routes = []
+for route in routes:
+    print(f"{route.get('name', '')}\t{route.get('exit_host', '')}\t{route.get('exit_port', '')}")
+PYEOF
+)
+    else
+        echo -e "  ${YELLOW}⚠ 当前不是 Relay 线路表环境，跳过${NC}"
+    fi
+
+    echo ""
+    echo -e "${GREEN}[6/8] 防火墙提示${NC}"
+    if command -v ufw >/dev/null 2>&1 && ufw status 2>/dev/null | grep -q "Status: active"; then
+        ufw status 2>/dev/null | sed 's/^/  /' || true
+    elif command -v firewall-cmd >/dev/null 2>&1 && firewall-cmd --state >/dev/null 2>&1; then
+        echo -e "  firewalld: 运行中，已放行端口：$(firewall-cmd --list-ports 2>/dev/null || true)"
+    elif command -v nft >/dev/null 2>&1; then
+        echo -e "  检测到 nftables。请确认业务端口和云厂商安全组都已放行。"
+    elif command -v iptables >/dev/null 2>&1; then
+        echo -e "  检测到 iptables。请确认业务端口和云厂商安全组都已放行。"
+    else
+        echo -e "  ${YELLOW}⚠ 未检测到常见防火墙工具${NC}"
+    fi
+
+    echo ""
+    echo -e "${GREEN}[7/8] BBR 与系统资源${NC}"
+    local bbr mem_total mem_used mem_percent disk_percent
+    bbr=$(sysctl -n net.ipv4.tcp_congestion_control 2>/dev/null || true)
+    if [ "$bbr" = "bbr" ]; then
+        echo -e "  ${GREEN}✓ BBR 已启用${NC}"
+    else
+        echo -e "  ${YELLOW}⚠ BBR 当前状态：${bbr:-未知}${NC}"
+    fi
+    mem_total=$(free -m 2>/dev/null | awk '/Mem:/ {print $2}')
+    mem_used=$(free -m 2>/dev/null | awk '/Mem:/ {print $3}')
+    mem_percent=$([ "${mem_total:-0}" -gt 0 ] && echo $((mem_used * 100 / mem_total)) || echo 0)
+    disk_percent=$(df / 2>/dev/null | awk 'NR==2 {print $5}' | tr -d '%')
+    echo -e "  内存: ${mem_used:-?}MB / ${mem_total:-?}MB (${mem_percent}%)"
+    echo -e "  磁盘: ${disk_percent:-?}% 已用"
+    if [ "${mem_percent:-0}" -gt 90 ] || [ "${disk_percent:-0}" -gt 90 ]; then
+        errors=$((errors + 1))
+    fi
+
+    echo ""
+    echo -e "${GREEN}[8/8] 最近错误日志${NC}"
+    local recent
+    recent=$(journalctl -u xray --since "1 hour ago" --no-pager 2>/dev/null | grep -i -E "error|fail|refused|panic" | tail -5 || true)
+    if [ -n "$recent" ]; then
+        echo -e "  ${YELLOW}发现可疑日志:${NC}"
+        echo "$recent" | sed 's/^/    /'
+        errors=$((errors + 1))
+    else
+        echo -e "  ${GREEN}✓ 最近 1 小时无明显错误${NC}"
+    fi
+
+    echo ""
+    echo -e "${CYAN}━━━ 诊断总结 ━━━${NC}"
+    if [ "$errors" -eq 0 ]; then
+        ok "所有关键检查通过"
+    else
+        echo -e "${RED}发现 ${errors} 个需要处理的问题${NC}"
+    fi
+}
+
+update_xray() {
+    echo -e "${GREEN}[更新 Xray]${NC}"
+    local url tmp actual_sha
+    url="https://raw.githubusercontent.com/XTLS/Xray-install/${XRAY_INSTALL_REF}/install-release.sh"
+    tmp=$(mktemp /tmp/xray-update.XXXXXX.sh)
+    # shellcheck disable=SC2064
+    trap "rm -f '$tmp'" RETURN
+    curl -fsSL --max-time 30 "$url" -o "$tmp" || die "下载 Xray 安装脚本失败：$url"
+    head -1 "$tmp" | grep -q '^#!' || die "下载内容不是 shell 脚本"
+    grep -q 'Xray' "$tmp" || die "下载内容缺少 Xray 关键字"
+    actual_sha=$(sha256sum "$tmp" | awk '{print $1}')
+    if [ -n "$XRAY_INSTALL_SHA256" ]; then
+        [ "$actual_sha" = "$XRAY_INSTALL_SHA256" ] || die "Xray 安装脚本 sha256 不匹配"
+        ok "Xray 安装脚本 sha256 校验通过"
+    else
+        warn "未设置 XRAY_INSTALL_SHA256，当前 install-release.sh sha256: $actual_sha"
+    fi
+    bash "$tmp" install
+    restart_xray
+    ok "Xray 更新完成"
 }
 
 relay_manager() {
@@ -1462,21 +1899,30 @@ relay_manager() {
         echo "1) 添加/更新一条落地线路"
         echo "2) 查看线路状态"
         echo "3) 流量统计"
-        echo "4) 删除一条线路"
-        echo "5) 修改线路名称"
-        echo "6) 查看所有线路和客户端链接"
-        echo "7) 重启 Xray"
+        echo "4) 显示线路二维码"
+        echo "5) 刷新/显示订阅"
+        echo "6) 修改线路入口端口"
+        echo "7) 删除一条线路"
+        echo "8) 修改线路名称"
+        echo "9) 查看所有线路和客户端链接"
+        echo "10) 一键排错诊断"
+        echo "11) 重启 Xray"
         echo "0) 返回"
         echo ""
-        read -r -p "请选择: " relay_choice
+        local relay_choice=""
+        prompt_read relay_choice -rp "请选择 [0-11]: " || return 0
         case "$relay_choice" in
             1) install_relay; break ;;
             2) show_route_status; read -r -p "按回车返回菜单..." _ ;;
             3) show_traffic_stats; read -r -p "按回车返回菜单..." _ ;;
-            4) delete_relay_route; break ;;
-            5) rename_relay_route; break ;;
-            6) list_relay_routes; read -r -p "按回车返回菜单..." _ ;;
-            7) restart_xray; read -r -p "按回车返回菜单..." _ ;;
+            4) show_route_qrcode; read -r -p "按回车返回菜单..." _ ;;
+            5) show_subscription; read -r -p "按回车返回菜单..." _ ;;
+            6) change_relay_port; break ;;
+            7) delete_relay_route; break ;;
+            8) rename_relay_route; break ;;
+            9) list_relay_routes; read -r -p "按回车返回菜单..." _ ;;
+            10) diagnose_system; read -r -p "按回车返回菜单..." _ ;;
+            11) restart_xray; read -r -p "按回车返回菜单..." _ ;;
             0) return ;;
             *) echo -e "${RED}无效选择${NC}" ;;
         esac
@@ -1640,6 +2086,7 @@ install_relay() {
     echo -e "Client Short ID:   ${YELLOW}${CLIENT_SHORT_ID}${NC}"
     echo -e "Client SNI:        ${YELLOW}${REALITY_SERVER_NAME}${NC}"
     print_client_link "$relay_ip" "$ROUTE_NAME"
+    refresh_subscription_file >/dev/null && ok "订阅已刷新：$SUBSCRIPTION_FILE" || true
 }
 
 show_info() {
@@ -1664,7 +2111,8 @@ guided_install() {
     echo "3) 管理 Relay 已有线路（状态/统计/删除/改名/重启）"
     echo "0) 返回"
     echo ""
-    read -r -p "请选择: " role_choice
+    local role_choice=""
+    prompt_read role_choice -rp "请选择 [0-3]: " || return 0
     case "$role_choice" in
         1)
             echo ""
@@ -1686,7 +2134,7 @@ guided_install() {
 }
 
 uninstall_all() {
-    warn "这会卸载 Xray 并删除 $CONFIG_FILE / $INFO_FILE"
+    warn "这会卸载 Xray 并删除 $CONFIG_FILE / $INFO_FILE / $ROUTES_FILE"
     read -r -p "确认卸载？(yes/no): " answer
     [ "$answer" = "yes" ] || { echo "已取消"; return; }
     if command -v xray >/dev/null 2>&1; then
@@ -1697,7 +2145,7 @@ uninstall_all() {
         trap "rm -f '$tmp'" RETURN
         curl -fsSL --max-time 30 "$url" -o "$tmp" && bash "$tmp" remove || true
     fi
-    rm -f "$CONFIG_FILE" "$INFO_FILE" "$ROUTES_FILE" "$IP_CACHE_FILE"
+    rm -f "$CONFIG_FILE" "$INFO_FILE" "$ROUTES_FILE" "$SUBSCRIPTION_FILE" "$IP_CACHE_FILE"
     ok "卸载流程已完成"
 }
 
@@ -1706,26 +2154,34 @@ main_menu() {
         print_banner
         print_install_flow
         echo ""
-        echo "1) 推荐向导安装（按 Step 1/Step 2 引导）"
-        echo "2) Step 1: Install Exit VPS（落地 VPS，最终直连出站）"
-        echo "3) Step 2: Add Relay Route（中转 VPS 添加/更新一条线路）"
-        echo "4) Route status（查看线路状态）"
-        echo "5) Traffic stats（流量统计）"
-        echo "6) Relay route manager（查看/删除/改名多条线路）"
-        echo "7) Restart Xray"
-        echo "8) Uninstall"
-        echo "0) Exit"
+        echo "1) 推荐向导安装（新手选这个）"
+        echo "2) Step 1：安装 Exit 落地 VPS"
+        echo "3) Step 2：在 Relay 中转 VPS 添加线路"
+        echo "4) 查看线路状态"
+        echo "5) 流量统计"
+        echo "6) 显示线路二维码"
+        echo "7) 刷新/显示订阅"
+        echo "8) Relay 多线路管理（改名/改端口/删除）"
+        echo "9) 一键排错诊断"
+        echo "10) 更新 Xray"
+        echo "11) 重启 Xray"
+        echo "12) 卸载"
+        echo "0) 退出"
         echo ""
-        read -r -p "请选择: " choice
+        prompt_read choice -rp "请选择 [0-12]: " || exit 0
         case "$choice" in
             1) guided_install; break ;;
             2) install_exit; break ;;
             3) install_relay; break ;;
             4) show_route_status; read -r -p "按回车返回菜单..." _ ;;
             5) show_traffic_stats; read -r -p "按回车返回菜单..." _ ;;
-            6) relay_manager; break ;;
-            7) restart_xray; read -r -p "按回车返回菜单..." _ ;;
-            8) uninstall_all; break ;;
+            6) show_route_qrcode; read -r -p "按回车返回菜单..." _ ;;
+            7) show_subscription; read -r -p "按回车返回菜单..." _ ;;
+            8) relay_manager; break ;;
+            9) diagnose_system; read -r -p "按回车返回菜单..." _ ;;
+            10) update_xray; read -r -p "按回车返回菜单..." _ ;;
+            11) restart_xray; read -r -p "按回车返回菜单..." _ ;;
+            12) uninstall_all; break ;;
             0) exit 0 ;;
             *) echo -e "${RED}无效选择${NC}" ;;
         esac
@@ -1742,8 +2198,13 @@ case "${1:-}" in
     --relay) install_relay ;;
     --list) list_relay_routes ;;
     --stats) show_traffic_stats ;;
+    --qr) show_route_qrcode ;;
+    --sub) show_subscription ;;
     --delete) delete_relay_route ;;
     --rename) rename_relay_route ;;
+    --port) change_relay_port ;;
+    --doctor) diagnose_system ;;
+    --update) update_xray ;;
     --guided|"") main_menu ;;
     --status) show_route_status ;;
     --restart) restart_xray ;;

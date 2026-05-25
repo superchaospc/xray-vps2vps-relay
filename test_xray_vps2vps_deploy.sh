@@ -191,6 +191,49 @@ run_exit_bundle_test() {
     pass "exit bundle"
 }
 
+run_subscription_and_prompt_test() {
+    local sourceable tmp_routes tmp_sub
+    sourceable="$(mktemp /tmp/vps2vps-source.XXXXXX)"
+    tmp_routes="$(mktemp /tmp/vps2vps-routes.XXXXXX)"
+    tmp_sub="$(mktemp /tmp/vps2vps-sub.XXXXXX)"
+    # shellcheck disable=SC2064
+    trap "rm -f '$sourceable' '$tmp_routes' '$tmp_sub'" RETURN
+    make_sourceable_copy "$sourceable"
+
+    bash -c '
+        source "$0"
+        ROUTES_FILE="$1"
+        SUBSCRIPTION_FILE="$2"
+        CLIENT_FP="chrome"
+        RELAY_PORT="443"
+        CLIENT_UUID="22222222-2222-4222-8222-222222222222"
+        CLIENT_PRIVATE_KEY="relay_private_key_for_shape_test"
+        CLIENT_PUBLIC_KEY="relay_public_key_for_shape_test"
+        CLIENT_SHORT_ID="dcba4321dcba4321"
+        EXIT_HOST="203.0.113.10"
+        EXIT_PORT="443"
+        EXIT_UUID="11111111-1111-4111-8111-111111111111"
+        EXIT_PUBLIC_KEY="exit_public_key_for_shape_test"
+        EXIT_SHORT_ID="abcd1234abcd1234"
+        EXIT_SNI="www.cloudflare.com"
+        REALITY_SERVER_NAME="www.cloudflare.com"
+        REALITY_DEST="www.cloudflare.com:443"
+        save_relay_route "Spain Node"
+        get_public_ip() { printf "%s\n" "198.51.100.1"; }
+        count=$(refresh_subscription_file)
+        [ "$count" = "1" ]
+        python3 - "$SUBSCRIPTION_FILE" <<PY
+import base64, sys
+payload = base64.b64decode(open(sys.argv[1]).read().strip()).decode()
+assert "vless://22222222-2222-4222-8222-222222222222@198.51.100.1:443" in payload
+assert "#Spain%20Node" in payload
+PY
+        printf "  7  \n" | { prompt_read picked; [ "$picked" = "7" ]; }
+    ' "$sourceable" "$tmp_routes" "$tmp_sub"
+
+    pass "subscription and prompt"
+}
+
 run_x25519_parser_test() {
     local private_key public_key
     private_key=$(awk -F':[[:space:]]*' 'tolower($1) ~ /private/ {print $2; exit}' <<'EOF'
@@ -216,6 +259,7 @@ main() {
     run_shellcheck_test
     run_config_generation_test
     run_exit_bundle_test
+    run_subscription_and_prompt_test
     run_x25519_parser_test
     pass "all tests passed"
 }

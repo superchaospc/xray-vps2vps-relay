@@ -1,10 +1,26 @@
 # xray-vps2vps-relay
 
 [![GitHub release](https://img.shields.io/github/v/release/superchaospc/xray-vps2vps-relay?style=flat-square)](https://github.com/superchaospc/xray-vps2vps-relay/releases)
+[![Release date](https://img.shields.io/github/release-date/superchaospc/xray-vps2vps-relay?style=flat-square)](https://github.com/superchaospc/xray-vps2vps-relay/releases)
+[![Downloads](https://img.shields.io/github/downloads/superchaospc/xray-vps2vps-relay/total?style=flat-square)](https://github.com/superchaospc/xray-vps2vps-relay/releases)
+[![Last commit](https://img.shields.io/github/last-commit/superchaospc/xray-vps2vps-relay?style=flat-square)](https://github.com/superchaospc/xray-vps2vps-relay/commits/main)
+[![Issues](https://img.shields.io/github/issues/superchaospc/xray-vps2vps-relay?style=flat-square)](https://github.com/superchaospc/xray-vps2vps-relay/issues)
+[![Stars](https://img.shields.io/github/stars/superchaospc/xray-vps2vps-relay?style=flat-square)](https://github.com/superchaospc/xray-vps2vps-relay/stargazers)
+[![Forks](https://img.shields.io/github/forks/superchaospc/xray-vps2vps-relay?style=flat-square)](https://github.com/superchaospc/xray-vps2vps-relay/network/members)
 [![GitHub repo size](https://img.shields.io/github/repo-size/superchaospc/xray-vps2vps-relay?style=flat-square)](https://github.com/superchaospc/xray-vps2vps-relay)
+[![Code size](https://img.shields.io/github/languages/code-size/superchaospc/xray-vps2vps-relay?style=flat-square)](https://github.com/superchaospc/xray-vps2vps-relay)
 [![License](https://img.shields.io/github/license/superchaospc/xray-vps2vps-relay?style=flat-square)](LICENSE)
 [![Shell](https://img.shields.io/badge/language-Bash-4EAA25?style=flat-square)](xray_vps2vps_deploy.sh)
 [![Platform](https://img.shields.io/badge/platform-Linux%20systemd-blue?style=flat-square)](README.md)
+[![Xray](https://img.shields.io/badge/core-Xray-2F6FED?style=flat-square)](https://github.com/XTLS/Xray-core)
+[![VLESS REALITY](https://img.shields.io/badge/protocol-VLESS%20%2B%20REALITY-7C3AED?style=flat-square)](README.md)
+[![BBR](https://img.shields.io/badge/BBR-auto%20enable-00A86B?style=flat-square)](README.md)
+[![Multi route](https://img.shields.io/badge/relay-multi--route-orange?style=flat-square)](README.md)
+[![QR import](https://img.shields.io/badge/client-QR%20import-0EA5E9?style=flat-square)](README.md)
+[![Subscription](https://img.shields.io/badge/subscription-base64-10B981?style=flat-square)](README.md)
+[![Debian](https://img.shields.io/badge/Debian-supported-A81D33?style=flat-square)](README.md)
+[![Ubuntu](https://img.shields.io/badge/Ubuntu-supported-E95420?style=flat-square)](README.md)
+[![CentOS](https://img.shields.io/badge/CentOS-supported-262577?style=flat-square)](README.md)
 
 单文件脚本，用于部署：
 
@@ -138,12 +154,17 @@ REALITY_SITE='microsoft' REALITY_SERVER_NAME='www.microsoft.com' EXIT_BUNDLE='..
 - 添加/更新落地线路
 - 查看线路状态：Xray 服务、本地监听端口、到 Exit 的 TCP 连通性
 - 流量统计：按线路显示 Xray 启动以来的上下行流量
+- 显示线路二维码：选择单条或全部线路，直接在终端扫码导入
+- 刷新/显示订阅：生成 `/root/xray_vps2vps_subscription.txt` 和 `data:text/plain;base64,...` 订阅链接
+- 修改线路入口端口：保留线路参数，只更换 Relay 对客户端监听的端口
 - 删除线路
 - 修改线路名称
 - 查看所有线路和客户端链接
+- 一键排错诊断：检查 Xray、配置、端口监听、Exit 连通性、防火墙、BBR、系统资源和最近日志
+- 更新 Xray
 - 重启 Xray
 
-## 查看、统计和删除线路
+## 常用管理命令
 
 查看所有线路和客户端链接：
 
@@ -163,6 +184,24 @@ REALITY_SITE='microsoft' REALITY_SERVER_NAME='www.microsoft.com' EXIT_BUNDLE='..
 /root/xray_vps2vps_deploy.sh --stats
 ```
 
+显示二维码：
+
+```bash
+/root/xray_vps2vps_deploy.sh --qr
+```
+
+刷新并显示订阅：
+
+```bash
+/root/xray_vps2vps_deploy.sh --sub
+```
+
+修改线路入口端口：
+
+```bash
+/root/xray_vps2vps_deploy.sh --port
+```
+
 修改线路名称：
 
 ```bash
@@ -176,6 +215,18 @@ REALITY_SITE='microsoft' REALITY_SERVER_NAME='www.microsoft.com' EXIT_BUNDLE='..
 ```
 
 删除时只移除指定 Relay 入口端口对应的线路，其余线路不受影响。
+
+一键排错诊断：
+
+```bash
+/root/xray_vps2vps_deploy.sh --doctor
+```
+
+更新 Xray：
+
+```bash
+/root/xray_vps2vps_deploy.sh --update
+```
 
 ## 失败回滚
 
@@ -210,13 +261,18 @@ REALITY_SITE='microsoft' REALITY_SERVER_NAME='www.microsoft.com' EXIT_BUNDLE='PA
 /root/xray_vps2vps_deploy.sh --status
 ```
 
-查看 / 统计 / 改名 / 删除 Relay 线路：
+查看 / 统计 / 二维码 / 订阅 / 改端口 / 改名 / 删除 Relay 线路：
 
 ```bash
 /root/xray_vps2vps_deploy.sh --list
 /root/xray_vps2vps_deploy.sh --stats
+/root/xray_vps2vps_deploy.sh --qr
+/root/xray_vps2vps_deploy.sh --sub
+/root/xray_vps2vps_deploy.sh --port
 /root/xray_vps2vps_deploy.sh --rename
 /root/xray_vps2vps_deploy.sh --delete
+/root/xray_vps2vps_deploy.sh --doctor
+/root/xray_vps2vps_deploy.sh --restart
 ```
 
 ## 可选环境变量
